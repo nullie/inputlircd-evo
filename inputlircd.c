@@ -47,8 +47,10 @@
 
 typedef struct evdev {
 	struct ev_io watcher;
+	struct ev_timer repeat_timer;
 	char *name;
 	int fd;
+	struct input_event event;
 	struct evdev *next;
 } evdev_t;
 
@@ -80,6 +82,11 @@ static struct timeval previous_input;
 static struct input_event previous_event;
 static int repeat = 0;
 
+// Looks like lirc will strip first repeating events, so set delay is not desirable
+static ev_tstamp repeat_delay = 0;
+static ev_tstamp repeat_interval = .1;
+
+static void repeat_cb(EV_P_ struct ev_timer *w, int revents);
 static void evdev_cb(EV_P_ struct ev_io *w, int revents);
 static void evdev_start(evdev_t *evdev);
 static void sock_cb(EV_P_ struct ev_io *w, int revents);
@@ -208,6 +215,8 @@ static void add_evdev(char *name) {
 	newdev->fd = fd;
 	newdev->name = strdup(name);
 	newdev->next = evdevs;
+	newdev->watcher.data = (void *)newdev;
+	newdev->repeat_timer.data = (void *)newdev;
 	evdevs = newdev;
 }
 
@@ -301,11 +310,10 @@ static long time_elapsed(struct timeval *last, struct timeval *current) {
 	return 1000000 * seconds + current->tv_usec - last->tv_usec;
 }
 
+void sendmessage(evdev_t *evdev);
+
 static void processevent(evdev_t *evdev) {
 	struct input_event event;
-	char message[1000];
-	int len;
-	client_t *client, *prev, *next;
 
 	if(read(evdev->fd, &event, sizeof event) != sizeof event) {
 		syslog(LOG_ERR, "Error processing event from %s: %s\n", evdev->name, strerror(errno));
@@ -340,24 +348,40 @@ static void processevent(evdev_t *evdev) {
 		}
 	}
 
-	if(!event.value) 
+	// stop repeating (or waiting to start repeating)
+	ev_timer_stop(loop, &evdev->repeat_timer);
+
+	if(!event.value)
 		return;
+
+	ev_timer_init(&evdev->repeat_timer, repeat_cb, repeat_delay, repeat_interval);
+	ev_timer_start(loop, &evdev->repeat_timer);
 
 	struct timeval current;
 	gettimeofday(&current, NULL);
-	if(event.code == previous_event.code && time_elapsed(&previous_input, &current) < repeat_time)
+	if(evdev->event.code == previous_event.code && time_elapsed(&previous_input, &current) < repeat_time)
 		repeat++;
-	else 
+	else
 		repeat = 0;
 
-	if(KEY_NAME[event.code])
-		len = snprintf(message, sizeof message, "%x %x %s%s%s%s%s %s\n", event.code, repeat, ctrl ? "CTRL_" : "", shift ? "SHIFT_" : "", alt ? "ALT_" : "", meta ? "META_" : "", KEY_NAME[event.code], evdev->name);
-	else
-		len = snprintf(message, sizeof message, "%x %x KEY_CODE_%d %s\n", event.code, repeat, event.code, evdev->name);
+	evdev->event = event;
+
+	sendmessage(evdev);
 
 	previous_input = current;
 	previous_event = event;
-	
+}
+
+void sendmessage(evdev_t *evdev) {
+	char message[1000];
+	int len;
+	client_t *client, *prev, *next;
+
+	if(KEY_NAME[evdev->event.code])
+		len = snprintf(message, sizeof message, "%x %x %s%s%s%s%s %s\n", evdev->event.code, repeat, ctrl ? "CTRL_" : "", shift ? "SHIFT_" : "", alt ? "ALT_" : "", meta ? "META_" : "", KEY_NAME[evdev->event.code], evdev->name);
+	else
+		len = snprintf(message, sizeof message, "%x %x KEY_CODE_%d %s\n", evdev->event.code, repeat, evdev->event.code, evdev->name);
+
 	for(client = clients; client; client = client->next) {
 		if(write(client->fd, message, len) != len) {
 			close(client->fd);
@@ -379,13 +403,17 @@ static void processevent(evdev_t *evdev) {
 	}
 }
 
+static void repeat_cb(EV_P_ struct ev_timer *w, int revents) {
+	repeat++;
+	sendmessage((evdev_t *)w->data);
+}
+
 static void evdev_cb(EV_P_ struct ev_io *w, int revents) {
 	processevent((evdev_t *)w->data);
 }
 
 static void evdev_start(evdev_t *evdev) {
 	ev_io_init(&evdev->watcher, evdev_cb, evdev->fd, EV_READ);
-	evdev->watcher.data = (void *)evdev;
 	ev_io_start(loop, &evdev->watcher);
 }
 
