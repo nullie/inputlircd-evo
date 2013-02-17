@@ -41,9 +41,12 @@
 #include <fnmatch.h>
 
 #include </usr/include/linux/input.h>
+#include <ev.h>
+
 #include "names.h"
 
 typedef struct evdev {
+	struct ev_io watcher;
 	char *name;
 	int fd;
 	struct evdev *next;
@@ -64,6 +67,8 @@ static bool grab = false;
 static int key_min = 88;
 static char *device = "/var/run/lirc/lircd";
 
+struct ev_loop *loop;
+
 static bool capture_modifiers = false;
 static bool meta = false;
 static bool alt = false;
@@ -72,9 +77,13 @@ static bool ctrl = false;
 
 static long repeat_time = 0L;
 static struct timeval previous_input;
-static struct timeval evdev_timeout;
 static struct input_event previous_event;
 static int repeat = 0;
+
+static void evdev_cb(EV_P_ struct ev_io *w, int revents);
+static void evdev_start(evdev_t *evdev);
+static void sock_cb(EV_P_ struct ev_io *w, int revents);
+static void timeout_cb(EV_P_ struct ev_timer *w, int revents);
 
 static void *xalloc(size_t size) {
 	void *buf = malloc(size);
@@ -169,16 +178,17 @@ static int open_evdev(char *name) {
 	return fd;
 }
 
-static void rescan_evdevs(fd_set *permset) {
+static void rescan_evdevs() {
 	evdev_t *evdev;
 	int fd;
+
 	for(evdev = evdevs; evdev; evdev = evdev->next) {
 		if(evdev->fd == -999) {
 			syslog(LOG_INFO, "Reading device: %s", evdev->name);
 			fd = open_evdev(evdev->name);
 			if(fd >= 0) {
 				evdev->fd = fd;
-				FD_SET(evdev->fd, permset);
+				evdev_start(evdev);
 				syslog(LOG_INFO, "Success!");
 			}
 		}
@@ -291,7 +301,7 @@ static long time_elapsed(struct timeval *last, struct timeval *current) {
 	return 1000000 * seconds + current->tv_usec - last->tv_usec;
 }
 
-static void processevent(evdev_t *evdev, fd_set *permset) {
+static void processevent(evdev_t *evdev) {
 	struct input_event event;
 	char message[1000];
 	int len;
@@ -299,7 +309,7 @@ static void processevent(evdev_t *evdev, fd_set *permset) {
 
 	if(read(evdev->fd, &event, sizeof event) != sizeof event) {
 		syslog(LOG_ERR, "Error processing event from %s: %s\n", evdev->name, strerror(errno));
-		FD_CLR(evdev->fd, permset);
+		ev_io_stop(loop, &(evdev->watcher));
 		close(evdev->fd);
 		evdev->fd = -999;
 		return;
@@ -369,53 +379,46 @@ static void processevent(evdev_t *evdev, fd_set *permset) {
 	}
 }
 
-static void main_loop(void) {
-	fd_set permset;
-	fd_set fdset;
-	evdev_t *evdev;
-	int maxfd = 0;
-	int retselect;
+static void evdev_cb(EV_P_ struct ev_io *w, int revents) {
+	processevent((evdev_t *)w->data);
+}
 
-	FD_ZERO(&permset);
-	
+static void evdev_start(evdev_t *evdev) {
+	ev_io_init(&evdev->watcher, evdev_cb, evdev->fd, EV_READ);
+	evdev->watcher.data = (void *)evdev;
+	ev_io_start(loop, &evdev->watcher);
+}
+
+static void sock_cb(EV_P_ struct ev_io *w, int revents) {
+	processnewclient();
+}
+
+static void timeout_cb(EV_P_ struct ev_timer *w, int revents) {
+	rescan_evdevs();
+}
+
+static void main_loop(void) {
+	evdev_t *evdev;
+	ev_io sock_watcher;
+	ev_timer timeout_watcher;
+
+	loop = ev_default_loop(0);
+
 	for(evdev = evdevs; evdev; evdev = evdev->next) {
 		if(evdev->fd < 0)
 			continue;
-		FD_SET(evdev->fd, &permset);
-		if(evdev->fd > maxfd)
-			maxfd = evdev->fd;
-	}
-	
-	FD_SET(sockfd, &permset);
-	if(sockfd > maxfd)
-		maxfd = sockfd;
 
-	maxfd++;
-	
-	while(true) {
-		fdset = permset;
-		
-		//wait for 30 secs, then rescan devices
-		evdev_timeout.tv_sec = 30;
-		
-		retselect = select(maxfd, &fdset, NULL, NULL, &evdev_timeout);
-		if(retselect > 0) {
-			for(evdev = evdevs; evdev; evdev = evdev->next)
-				if(FD_ISSET(evdev->fd, &fdset))
-					processevent(evdev, &permset);
-
-			if(FD_ISSET(sockfd, &fdset))
-				processnewclient();
-		}
-		else {
-			if(retselect < 0) {
-				if(errno == EINTR)
-					continue;
-				syslog(LOG_ERR, "Error during select(): %s\n", strerror(errno));
-			}
-			rescan_evdevs(&permset);
-		}
+		evdev_start(evdev);
 	}
+
+	ev_io_init(&sock_watcher, sock_cb, sockfd, EV_READ);
+	ev_io_start(loop, &sock_watcher);
+
+	// rescan devices every 30 seconds
+	ev_timer_init(&timeout_watcher, timeout_cb, 30, 30);
+	ev_timer_start(loop, &timeout_watcher);
+
+	ev_loop(loop, 0);
 }
 
 

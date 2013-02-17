@@ -18,7 +18,7 @@ SBIN = inputlircd
 MAN8 = inputlircd.8
 
 CC ?= gcc
-CFLAGS ?= -Wall -g -O2 -pipe
+CFLAGS ?= -Wall -g -O2 -pipe -lev
 PREFIX ?= /usr/local
 INSTALL ?= install
 SBINDIR ?= $(PREFIX)/sbin
