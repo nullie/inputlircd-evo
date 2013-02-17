@@ -1,0 +1,36 @@
+#!/bin/sh
+
+# inputlircd -- zeroconf LIRC daemon that reads from /dev/input/event devices
+# Copyright (C) 2006-2009  Guus Sliepen <guus@sliepen.eu.org>
+# 
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of version 2 of the GNU General Public License as published
+# by the Free Software Foundation.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
+
+TYPES="KEY BTN"
+
+for type in $TYPES; do
+	grep "^#define ${type}_" < $1 | sed 's/\/\*.*//g'
+done
+
+grep "^#define EV_KEY" < $1 | sed 's/\/\*.*//g'
+grep "^#define KEY_MAX" < $1 | sed 's/\/\*.*//g'
+
+echo "static const char *KEY_NAME[KEY_MAX] = {"
+for type in $TYPES; do
+	awk "
+		/EV_VERSION/	{ next };
+		/_MAX/		{ next };
+		/#define ${type}_/	{ printf(\"\t[ %-16s ] = \\\"%s\\\",\n\", \$2, \$2); }
+	" < $1 | tac
+done
+echo "};"
