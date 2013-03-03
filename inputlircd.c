@@ -48,6 +48,7 @@
 typedef struct evdev {
 	struct ev_io watcher;
 	struct ev_timer repeat_timer;
+	char *path;
 	char *name;
 	int fd;
 	struct input_event event;
@@ -191,8 +192,8 @@ static void rescan_evdevs() {
 
 	for(evdev = evdevs; evdev; evdev = evdev->next) {
 		if(evdev->fd == -999) {
-			syslog(LOG_INFO, "Reading device: %s", evdev->name);
-			fd = open_evdev(evdev->name);
+			syslog(LOG_INFO, "Reading device: %s", evdev->path);
+			fd = open_evdev(evdev->path);
 			if(fd >= 0) {
 				evdev->fd = fd;
 				evdev_start(evdev);
@@ -203,17 +204,18 @@ static void rescan_evdevs() {
 }
 
 
-static void add_evdev(char *name) {
+static void add_evdev(char *name, char *path) {
 	int fd;
 	evdev_t *newdev;
 
-	fd = open_evdev(name);
+	fd = open_evdev(path);
 	if(fd < 0)
 		return;
 
 	newdev = xalloc(sizeof *newdev);
 	newdev->fd = fd;
 	newdev->name = strdup(name);
+	newdev->path = strdup(path);
 	newdev->next = evdevs;
 	newdev->watcher.data = (void *)newdev;
 	newdev->repeat_timer.data = (void *)newdev;
@@ -252,7 +254,7 @@ static void add_named(char *pattern) {
 		
 		name[(sizeof name) -1] = 0;
 		if(!fnmatch(pattern, name, FNM_CASEFOLD))
-			add_evdev(g.gl_pathv[i]);
+			add_evdev(name, g.gl_pathv[i]);
 	}
 
 	globfree(&g);
@@ -316,7 +318,7 @@ static void processevent(evdev_t *evdev) {
 	struct input_event event;
 
 	if(read(evdev->fd, &event, sizeof event) != sizeof event) {
-		syslog(LOG_ERR, "Error processing event from %s: %s\n", evdev->name, strerror(errno));
+		syslog(LOG_ERR, "Error processing event from %s: %s\n", evdev->path, strerror(errno));
 		ev_io_stop(loop, &(evdev->watcher));
 		close(evdev->fd);
 		evdev->fd = -999;
@@ -502,7 +504,7 @@ int main(int argc, char *argv[]) {
 	openlog("inputlircd", LOG_PERROR, LOG_DAEMON);
 
 	for(i = optind; i < argc; i++)
-		add_evdev(argv[i]);
+		add_evdev(argv[i], argv[i]);
 
 	if(!evdevs) {
 		fprintf(stderr, "Unable to open any event device!\n");
